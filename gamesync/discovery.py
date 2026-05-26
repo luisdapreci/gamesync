@@ -1,5 +1,6 @@
 import socket
 import asyncio
+import time
 import httpx
 import logging
 from typing import List, Dict, Any, Optional
@@ -108,7 +109,7 @@ class DiscoveryManager:
             "name": name,
             "host": ip,
             "port": port,
-            "last_seen": asyncio.get_event_loop().time()
+            "last_seen": time.time()   # epoch time, consistent with DB
         }
         if self.loop:
             asyncio.run_coroutine_threadsafe(

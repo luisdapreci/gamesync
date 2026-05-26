@@ -1,5 +1,6 @@
 import os
 import time
+import fnmatch
 import logging
 import threading
 from pathlib import Path
@@ -48,12 +49,20 @@ class DebouncedHandler:
         if os.path.exists(absolute_path):
             self.callback(game_id, relative_path)
 
+    def shutdown(self):
+        """Cancel all pending debounce timers. Call before the DB connection closes."""
+        with self.lock:
+            for timer in self.timers.values():
+                timer.cancel()
+            self.timers.clear()
+
 class GameDirectoryHandler(FileSystemEventHandler):
     def __init__(self, game_profile: GameProfile, debouncer: DebouncedHandler):
         super().__init__()
         self.game_profile = game_profile
         self.debouncer = debouncer
         self.root_path = Path(game_profile.path).resolve()
+        self.pattern = game_profile.pattern or "*"
 
     def on_any_event(self, event):
         if event.is_directory:
@@ -67,6 +76,10 @@ class GameDirectoryHandler(FileSystemEventHandler):
         
         # Ignore files with matching extension
         if src_path.suffix.lower() in IGNORE_EXTENSIONS:
+            return
+
+        # Apply the game-specific glob pattern filter
+        if not fnmatch.fnmatch(src_path.name, self.pattern):
             return
 
         # Double check if inside watched path
@@ -94,6 +107,8 @@ class SaveWatcher:
 
     def stop(self):
         if self.is_running:
+            # Cancel pending debounce timers first so they don't fire after DB closes
+            self.debouncer.shutdown()
             self.observer.stop()
             self.observer.join()
             self.is_running = False

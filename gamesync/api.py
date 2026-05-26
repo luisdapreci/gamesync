@@ -1,4 +1,5 @@
 import os
+import time
 import logging
 from pathlib import Path
 from typing import List, Optional, Dict, Any
@@ -6,7 +7,6 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Header, HTTPExcepti
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import string
 
 from .config import ConfigManager
 from .database import SyncDatabase
@@ -53,10 +53,10 @@ def create_app(config_manager: ConfigManager, db: SyncDatabase, sync_engine: Syn
     def health():
         return {"status": "ok", "node_name": config_manager.settings.node_name}
 
-    # PIN validation endpoint
+    # PIN validation endpoint — reads PIN from X-PIN header (never a query param that appears in logs)
     @app.post("/api/auth/verify")
-    def verify_auth(pin: str = Query(...)):
-        if pin == config_manager.settings.pin:
+    def verify_auth(x_pin: Optional[str] = Header(None, alias="X-PIN")):
+        if x_pin == config_manager.settings.pin:
             return {"status": "success", "node_name": config_manager.settings.node_name}
         raise HTTPException(status_code=401, detail="Invalid PIN")
 
@@ -69,11 +69,10 @@ def create_app(config_manager: ConfigManager, db: SyncDatabase, sync_engine: Syn
         return {
             "node_name": config_manager.settings.node_name,
             "port": config_manager.settings.port,
-            "pin": config_manager.settings.pin,
             "games_count": len(config_manager.settings.games),
             "peers_count": len([p for p in peers if p["status"] == "online"]),
             "conflicts_count": len(conflicts),
-            "settings": config_manager.settings
+            "settings": config_manager.settings.model_dump(exclude={"pin"})
         }
 
     # --- Config Management ---
@@ -150,11 +149,27 @@ def create_app(config_manager: ConfigManager, db: SyncDatabase, sync_engine: Syn
     # --- Safe Directory Browser ---
     @app.get("/api/browse")
     def browse_directories(path: Optional[str] = None, x_pin: Optional[str] = Header(None, alias="X-PIN")):
+        import string
         check_pin(x_pin)
         
+        # Build the allowlist of root paths the browser may expose
+        _allowed_roots: List[Path] = []
+        user_profile = os.environ.get("USERPROFILE")
+        if user_profile:
+            _allowed_roots.append(Path(user_profile).resolve())
+        if os.name == 'nt':
+            try:
+                from ctypes import windll
+                bitmask = windll.kernel32.GetLogicalDrives()
+                for letter in string.ascii_uppercase:
+                    if bitmask & 1:
+                        _allowed_roots.append(Path(f"{letter}:\\"))
+                    bitmask >>= 1
+            except Exception:
+                pass
+
         if not path:
             shortcuts = []
-            user_profile = os.environ.get("USERPROFILE")
             if user_profile:
                 p = Path(user_profile)
                 shortcuts.append({"name": "User Profile", "path": str(p)})
@@ -185,6 +200,10 @@ def create_app(config_manager: ConfigManager, db: SyncDatabase, sync_engine: Syn
             if not p.exists():
                 return {"error": "Path does not exist", "directories": []}
             
+            # Path traversal guard: resolved path must sit under one of the allowed roots
+            if not any(str(p).startswith(str(root)) for root in _allowed_roots):
+                raise HTTPException(status_code=403, detail="Access to this path is not permitted")
+            
             dirs = []
             for child in p.iterdir():
                 try:
@@ -202,6 +221,8 @@ def create_app(config_manager: ConfigManager, db: SyncDatabase, sync_engine: Syn
                 "parent_path": str(p.parent) if p.parent != p else None,
                 "directories": sorted(dirs, key=lambda x: x["name"].lower())
             }
+        except HTTPException:
+            raise
         except Exception as e:
             return {"error": str(e), "directories": []}
 

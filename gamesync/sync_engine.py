@@ -33,6 +33,7 @@ class SyncEngine:
         self.db = db
         self.node_id = node_id
         self.event_callback = None # Set by FastAPI / WebSocket manager
+        self.loop: Optional[asyncio.AbstractEventLoop] = None  # Set after startup
 
         CONFLICTS_DIR.mkdir(parents=True, exist_ok=True)
         BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
@@ -41,24 +42,20 @@ class SyncEngine:
         self.event_callback = callback
 
     def trigger_ui_update(self, event_type: str, data: dict):
-        if self.event_callback:
-            # Schedule task in main thread loop
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                asyncio.run_coroutine_threadsafe(
-                    self.event_callback({"type": event_type, "data": data}),
-                    loop
-                )
+        if self.event_callback and self.loop and self.loop.is_running():
+            asyncio.run_coroutine_threadsafe(
+                self.event_callback({"type": event_type, "data": data}),
+                self.loop
+            )
 
     # --- Local File Watching Trigger ---
     def handle_local_change(self, game_id: str, relative_path: str):
         """Called by watchdog watcher when a file change is debounced."""
         # Because watcher runs in its own OS threads, we must schedule the sync logic in the main asyncio loop
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
+        if self.loop and self.loop.is_running():
             asyncio.run_coroutine_threadsafe(
                 self._sync_local_file_change(game_id, relative_path),
-                loop
+                self.loop
             )
 
     async def _sync_local_file_change(self, game_id: str, relative_path: str):
@@ -167,6 +164,12 @@ class SyncEngine:
         
         # Scenario 1: Local file doesn't exist
         if not local_file_path.exists():
+            # Validate integrity before writing
+            actual_sha = hashlib.sha256(file_content).hexdigest()
+            if actual_sha != sha256:
+                return {"status": "error", "message": f"SHA256 mismatch: expected {sha256}, got {actual_sha}"}
+            if len(file_content) != size:
+                return {"status": "error", "message": f"Size mismatch: expected {size}, got {len(file_content)}"}
             await self._apply_remote_file(game_id, relative_path, local_file_path, file_content, size, mtime, sha256, sync_version, sender_name)
             return {"status": "ok", "message": "File created"}
 
@@ -178,6 +181,13 @@ class SyncEngine:
             # Just keep DB updated
             await self.db.update_file_state(game_id, relative_path, size, mtime, sha256, status="synced", bump_version=False)
             return {"status": "ok", "message": "File is already in sync"}
+
+        # Validate integrity of incoming bytes before any write
+        actual_sha = hashlib.sha256(file_content).hexdigest()
+        if actual_sha != sha256:
+            return {"status": "error", "message": f"SHA256 mismatch: expected {sha256}, got {actual_sha}"}
+        if len(file_content) != size:
+            return {"status": "error", "message": f"Size mismatch: expected {size}, got {len(file_content)}"}
 
         # Scenario 3: Check if local file was modified since last sync (Three-way check)
         is_local_modified = False
@@ -208,12 +218,19 @@ class SyncEngine:
                               remote_bytes: bytes, remote_size: int, remote_mtime: float, remote_sha: str,
                               remote_peer_id: str, remote_peer_name: str) -> int:
         
-        # Generate safe filenames in conflict staging directory
+        # Insert conflict record first so we have a conflict_id to embed in filenames
+        local_stat = local_path.stat()
+        conflict_id = await self.db.add_conflict(
+            game_id, relative_path,
+            local_size=local_stat.st_size, local_mtime=local_stat.st_mtime, local_sha256=local_sha,
+            remote_size=remote_size, remote_mtime=remote_mtime, remote_sha256=remote_sha,
+            remote_peer_id=remote_peer_id, remote_peer_name=remote_peer_name
+        )
+
+        # Generate safe filenames that include conflict_id so resolution always picks the right files
         safe_rel_name = relative_path.replace("/", "_").replace("\\", "_")
-        timestamp = int(time.time())
-        
-        local_staging_path = CONFLICTS_DIR / f"{game_id}_{timestamp}_{safe_rel_name}.local"
-        remote_staging_path = CONFLICTS_DIR / f"{game_id}_{timestamp}_{safe_rel_name}.remote"
+        local_staging_path = CONFLICTS_DIR / f"{conflict_id}_{game_id}_{safe_rel_name}.local"
+        remote_staging_path = CONFLICTS_DIR / f"{conflict_id}_{game_id}_{safe_rel_name}.remote"
 
         # Save local version
         shutil.copy2(local_path, local_staging_path)
@@ -224,16 +241,6 @@ class SyncEngine:
         
         # Set remote timestamp
         os.utime(remote_staging_path, (remote_mtime, remote_mtime))
-
-        local_stat = local_path.stat()
-        
-        # Insert conflict into SQLite database
-        conflict_id = await self.db.add_conflict(
-            game_id, relative_path,
-            local_size=local_stat.st_size, local_mtime=local_stat.st_mtime, local_sha256=local_sha,
-            remote_size=remote_size, remote_mtime=remote_mtime, remote_sha256=remote_sha,
-            remote_peer_id=remote_peer_id, remote_peer_name=remote_peer_name
-        )
 
         await self.db.log_event(
             game_id, relative_path, "conflict_detected",
@@ -266,26 +273,12 @@ class SyncEngine:
         if not game:
             raise ValueError(f"Game profile {game_id} is missing")
 
-        # Find staging files
-        # Staging file contains conflict_id & name, but wait, the staged file is saved as:
-        # CONFLICTS_DIR / f"{game_id}_{timestamp}_{safe_rel_name}.local"
-        # We can find them by searching matches in the directory.
+        # Find staging files by conflict_id prefix (deterministic, no ambiguity)
         safe_rel_name = relative_path.replace("/", "_").replace("\\", "_")
-        prefix = f"{game_id}_"
-        suffix_local = f"_{safe_rel_name}.local"
-        suffix_remote = f"_{safe_rel_name}.remote"
+        local_staged = CONFLICTS_DIR / f"{conflict_id}_{game_id}_{safe_rel_name}.local"
+        remote_staged = CONFLICTS_DIR / f"{conflict_id}_{game_id}_{safe_rel_name}.remote"
 
-        local_staged = None
-        remote_staged = None
-        
-        for file in CONFLICTS_DIR.iterdir():
-            if file.name.startswith(prefix):
-                if file.name.endswith(suffix_local):
-                    local_staged = file
-                elif file.name.endswith(suffix_remote):
-                    remote_staged = file
-
-        if not local_staged or not remote_staged:
+        if not local_staged.exists() or not remote_staged.exists():
             raise FileNotFoundError("Conflict files not found in staging area")
 
         target_file_path = Path(game.path) / relative_path

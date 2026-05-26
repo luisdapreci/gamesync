@@ -1,4 +1,5 @@
 import asyncio
+import fnmatch
 import logging
 import uvicorn
 from pathlib import Path
@@ -48,6 +49,11 @@ async def run_initial_scan(config_manager: ConfigManager, db: SyncDatabase, sync
                 except ValueError:
                     continue
                 
+                # Apply the game-specific glob pattern filter
+                pattern = game.pattern or "*"
+                if not fnmatch.fnmatch(file_path.name, pattern):
+                    continue
+                
                 stat = file_path.stat()
                 file_size = stat.st_size
                 mtime = stat.st_mtime
@@ -91,6 +97,10 @@ async def lifespan(app: FastAPI):
     # Startup tasks
     logger.info("Initializing GameSync DB...")
     await db.connect()
+    
+    # Wire the running event loop into sync_engine so worker threads can schedule coroutines
+    running_loop = asyncio.get_running_loop()
+    sync_engine.loop = running_loop
     
     # Store watcher in app state so REST endpoints can update watches dynamically
     app.state.watcher = watcher
