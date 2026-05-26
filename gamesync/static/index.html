@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GameSync Dashboard</title>
+    <!-- Google Fonts: Outfit -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <!-- FontAwesome for Premium Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <!-- Stylesheet -->
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <!-- PIN Auth Screen -->
+    <div id="auth-screen" class="auth-overlay">
+        <div class="auth-card">
+            <div class="auth-icon"><i class="fa-solid fa-gamepad"></i></div>
+            <h2>Enter Access PIN</h2>
+            <p>Enter the 4-digit security PIN to access the GameSync console.</p>
+            <div class="pin-inputs">
+                <input type="password" id="pin-input" maxlength="8" placeholder="••••" autocomplete="off" autofocus>
+            </div>
+            <button id="auth-btn" class="btn btn-primary">Unlock Console</button>
+            <div id="auth-error" class="error-text"></div>
+        </div>
+    </div>
+
+    <!-- Main Dashboard Container -->
+    <div id="app-container" class="dashboard-wrapper hidden">
+        <!-- Sidebar / Navigation -->
+        <header class="navbar">
+            <div class="logo">
+                <i class="fa-solid fa-rotate"></i>
+                <span>Game<span>Sync</span></span>
+            </div>
+            <div class="node-info">
+                <span class="node-badge" id="current-node-badge">
+                    <i class="fa-solid fa-desktop"></i> <span id="current-node-name">Loading...</span>
+                </span>
+                <span class="status-indicator online" id="ws-status-indicator">
+                    <span class="pulse-ring"></span>
+                    Connected
+                </span>
+                <button id="logout-btn" class="btn-icon" title="Lock Console"><i class="fa-solid fa-lock"></i></button>
+            </div>
+        </header>
+
+        <main class="dashboard-content">
+            <!-- Grid Row 1: Summary Cards -->
+            <section class="summary-cards">
+                <div class="card summary-card">
+                    <div class="card-icon cyan"><i class="fa-solid fa-ghost"></i></div>
+                    <div class="card-details">
+                        <span class="card-label">Monitored Games</span>
+                        <h3 id="stat-games">0</h3>
+                    </div>
+                </div>
+                <div class="card summary-card">
+                    <div class="card-icon green"><i class="fa-solid fa-network-wired"></i></div>
+                    <div class="card-details">
+                        <span class="card-label">Active Peers</span>
+                        <h3 id="stat-peers">0</h3>
+                    </div>
+                </div>
+                <div class="card summary-card" id="conflict-summary-card">
+                    <div class="card-icon amber"><i class="fa-solid fa-triangle-exclamation"></i></div>
+                    <div class="card-details">
+                        <span class="card-label">Unresolved Conflicts</span>
+                        <h3 id="stat-conflicts">0</h3>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Conflicts Alert Panel (Shows only when conflicts exist) -->
+            <section id="conflicts-section" class="conflicts-container hidden">
+                <div class="section-header">
+                    <h2><i class="fa-solid fa-circle-exclamation text-amber"></i> Save Sync Conflicts Detected</h2>
+                    <p>Select which save file you want to keep. The non-selected version will be archived before overwriting.</p>
+                </div>
+                <div id="conflicts-list" class="conflicts-grid">
+                    <!-- Dynamic Conflict Items go here -->
+                </div>
+            </section>
+
+            <!-- Grid Row 2: Main Panels -->
+            <div class="panels-grid">
+                <!-- Games List Panel -->
+                <section class="card panel-card games-panel">
+                    <div class="panel-header">
+                        <h2><i class="fa-solid fa-folder-open"></i> Synced Folders</h2>
+                        <button id="add-game-btn" class="btn btn-sm btn-primary">
+                            <i class="fa-solid fa-plus"></i> Add Game
+                        </button>
+                    </div>
+                    <div id="games-list" class="list-container">
+                        <!-- Dynamic Games List -->
+                        <div class="empty-state">
+                            <i class="fa-solid fa-circle-info"></i>
+                            <p>No games configured yet. Click "Add Game" to get started.</p>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Sidebar column -->
+                <div class="sidebar-column">
+                    <!-- Peers Panel -->
+                    <section class="card panel-card peers-panel">
+                        <div class="panel-header">
+                            <h2><i class="fa-solid fa-circle-nodes"></i> Local Peers</h2>
+                        </div>
+                        <div class="add-manual-peer-form">
+                            <input type="text" id="peer-ip-input" placeholder="IP:Port (e.g. 192.168.1.15:8384)">
+                            <button id="add-peer-btn" class="btn btn-sm btn-secondary">Connect</button>
+                        </div>
+                        <div id="peers-list" class="list-container compact">
+                            <!-- Dynamic Peers List -->
+                        </div>
+                    </section>
+
+                    <!-- App Settings / PIN options -->
+                    <section class="card panel-card settings-panel">
+                        <div class="panel-header">
+                            <h2><i class="fa-solid fa-gears"></i> Engine Settings</h2>
+                        </div>
+                        <form id="settings-form" class="settings-form">
+                            <div class="form-group">
+                                <label for="setting-pin">Access PIN</label>
+                                <input type="text" id="setting-pin" maxlength="8">
+                            </div>
+                            <div class="form-group">
+                                <label for="setting-backups">Rotated Backups</label>
+                                <select id="setting-backups">
+                                    <option value="1">1 version</option>
+                                    <option value="3" selected>3 versions</option>
+                                    <option value="5">5 versions</option>
+                                    <option value="10">10 versions</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label for="setting-warn-size">Warn if file exceeds (MB)</label>
+                                <input type="number" id="setting-warn-size" min="1" max="1000">
+                            </div>
+                            <div class="form-group checkbox-group">
+                                <input type="checkbox" id="setting-startup">
+                                <label for="setting-startup">Start GameSync with Windows</label>
+                            </div>
+                            <button type="submit" class="btn btn-sm btn-primary btn-block">Save Configuration</button>
+                        </form>
+                    </section>
+                </div>
+            </div>
+
+            <!-- Activity Log Panel -->
+            <section class="card panel-card logs-panel">
+                <div class="panel-header">
+                    <h2><i class="fa-solid fa-receipt"></i> Activity History</h2>
+                </div>
+                <div class="logs-wrapper">
+                    <table class="logs-table">
+                        <thead>
+                            <tr>
+                                <th>Timestamp</th>
+                                <th>Game</th>
+                                <th>Relative Path</th>
+                                <th>Action</th>
+                                <th>Peer Source</th>
+                                <th>Details</th>
+                            </tr>
+                        </thead>
+                        <tbody id="logs-list">
+                            <!-- Dynamic Log Entries -->
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- Modal: Add Game Profile -->
+    <div id="add-game-modal" class="modal-overlay hidden">
+        <div class="modal-card">
+            <div class="modal-header">
+                <h3>Add Game Save Profile</h3>
+                <button class="modal-close btn-close-modal"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label for="game-name-input">Game Name</label>
+                    <input type="text" id="game-name-input" placeholder="e.g. Elden Ring">
+                </div>
+                <div class="form-group">
+                    <label for="game-path-input">Local Save Folder Path</label>
+                    <div class="path-input-wrapper">
+                        <input type="text" id="game-path-input" placeholder="C:\Users\...\AppData\Roaming\EldenRing">
+                        <button id="browse-dir-btn" class="btn btn-secondary" title="Browse Directories">
+                            <i class="fa-regular fa-folder-open"></i> Browse
+                        </button>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label for="game-pattern-input">Sync Pattern (Glob)</label>
+                    <input type="text" id="game-pattern-input" value="*" placeholder="e.g. * or *.sl2 or *.sav">
+                    <small>Use <code>*</code> to sync all files, or <code>*.sav</code> to sync specific extensions only.</small>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary btn-close-modal">Cancel</button>
+                <button id="save-game-btn" class="btn btn-primary">Create Profile</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal: Directory Browser -->
+    <div id="directory-browser-modal" class="modal-overlay hidden">
+        <div class="modal-card browser-card">
+            <div class="modal-header">
+                <h3><i class="fa-solid fa-folder-tree"></i> Browse Local Folders</h3>
+                <button class="modal-close btn-close-browser"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <div class="modal-body browser-body">
+                <div class="browser-navigation">
+                    <button id="browser-back-btn" class="btn btn-icon-sm" title="Go to Parent Folder"><i class="fa-solid fa-arrow-left"></i></button>
+                    <input type="text" id="browser-current-path" readonly>
+                </div>
+                <div class="browser-lists" id="browser-list-container">
+                    <!-- Folders render here -->
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary btn-close-browser">Cancel</button>
+                <button id="select-dir-btn" class="btn btn-primary">Select Current Folder</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast Container -->
+    <div id="toast-container" class="toast-container"></div>
+</body>
+</html>
