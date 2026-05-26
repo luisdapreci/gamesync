@@ -135,8 +135,10 @@ async function tryUnlock(pinCode) {
     }
     
     try {
-        const url = `${window.location.origin}/api/auth/verify?pin=${encodeURIComponent(pinCode)}`;
-        const response = await fetch(url, { method: "POST" });
+        const response = await fetch(`${window.location.origin}/api/auth/verify`, {
+            method: "POST",
+            headers: { "X-PIN": pinCode }
+        });
         
         if (response.ok) {
             const data = await response.json();
@@ -249,8 +251,7 @@ async function refreshStats() {
         statConflicts.textContent = status.conflicts_count;
         
         // Populate settings fields on initial load
-        if (!settingPin.value) {
-            settingPin.value = status.settings.pin;
+        if (!settingBackups.value) {
             settingBackups.value = status.settings.backup_count;
             settingWarnSize.value = status.settings.warn_file_size_mb;
             settingStartup.checked = status.settings.run_on_startup;
