@@ -30,10 +30,10 @@ def create_app(config_manager: ConfigManager, db: SyncDatabase, sync_engine: Syn
     # Active WebSocket clients
     active_websockets: List[WebSocket] = []
 
-    # Middleware-like PIN verification function
-    def check_pin(x_pin: Optional[str] = Header(None, alias="X-PIN"), pin: Optional[str] = Query(None)):
+    # Middleware-like PIN verification function (called manually, not as a FastAPI dependency)
+    def check_pin(x_pin: Optional[str]):
         expected_pin = config_manager.settings.pin
-        if x_pin != expected_pin and pin != expected_pin:
+        if x_pin != expected_pin:
             raise HTTPException(status_code=401, detail="Unauthorized: Invalid PIN")
 
     # Define a handler to broadcast status to WebSockets
