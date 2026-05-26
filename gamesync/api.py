@@ -75,6 +75,88 @@ def create_app(config_manager: ConfigManager, db: SyncDatabase, sync_engine: Syn
             "settings": config_manager.settings.model_dump(exclude={"pin"})
         }
 
+    # --- Discovery & Manual Sync ---
+    @app.get("/api/games/public")
+    async def get_public_games(x_pin: Optional[str] = Header(None, alias="X-PIN")):
+        check_pin(x_pin)
+        return [{"id": g.id, "name": g.name} for g in config_manager.settings.games]
+
+    @app.get("/api/games/remote")
+    async def get_remote_games(x_pin: Optional[str] = Header(None, alias="X-PIN")):
+        check_pin(x_pin)
+        peers = await db.get_peers()
+        online_peers = [p for p in peers if p["status"] == "online"]
+        remote_games = []
+        import httpx
+        
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            for peer in online_peers:
+                try:
+                    url = f"http://{peer['host']}:{peer['port']}/api/games/public"
+                    resp = await client.get(url, headers={"X-PIN": x_pin or ""})
+                    if resp.status_code == 200:
+                        games = resp.json()
+                        for g in games:
+                            remote_games.append({
+                                "peer_id": peer["peer_id"],
+                                "peer_name": peer["name"],
+                                "game_id": g["id"],
+                                "game_name": g["name"],
+                                "host": peer["host"],
+                                "port": peer["port"]
+                            })
+                except Exception as e:
+                    logger.error(f"Error fetching games from peer {peer['name']}: {e}")
+                    
+        return remote_games
+
+    @app.get("/api/games/{game_id}/state")
+    async def get_game_state(game_id: str, x_pin: Optional[str] = Header(None, alias="X-PIN")):
+        check_pin(x_pin)
+        async with db.conn.execute("SELECT relative_path, size, mtime, sha256 FROM files WHERE game_id = ?", (game_id,)) as cursor:
+            rows = await cursor.fetchall()
+            return [{"relative_path": r[0], "size": r[1], "mtime": r[2], "sha256": r[3]} for r in rows]
+
+    @app.get("/api/games/{game_id}/compare/{peer_id}")
+    async def compare_game_state(game_id: str, peer_id: str, x_pin: Optional[str] = Header(None, alias="X-PIN")):
+        check_pin(x_pin)
+        return await sync_engine.compare_with_peer(game_id, peer_id)
+
+    class ManualSyncRequest(BaseModel):
+        game_id: str
+        peer_id: str
+        selection: str
+        
+    @app.post("/api/sync/manual")
+    async def manual_sync(req: ManualSyncRequest, x_pin: Optional[str] = Header(None, alias="X-PIN")):
+        check_pin(x_pin)
+        try:
+            await sync_engine.execute_manual_sync(req.game_id, req.peer_id, req.selection)
+            return {"status": "success"}
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    @app.get("/api/games/{game_id}/file")
+    async def get_game_file(game_id: str, path: str = Query(...), x_pin: Optional[str] = Header(None, alias="X-PIN")):
+        check_pin(x_pin)
+        game = next((g for g in config_manager.settings.games if g.id == game_id), None)
+        if not game:
+            raise HTTPException(status_code=404, detail="Game not found")
+        
+        # Path traversal guard
+        import os
+        from pathlib import Path
+        root_path = Path(game.path).resolve()
+        target_path = (root_path / path).resolve()
+        if not str(target_path).startswith(str(root_path)):
+            raise HTTPException(status_code=403, detail="Path traversal detected")
+            
+        if not target_path.exists() or not target_path.is_file():
+            raise HTTPException(status_code=404, detail="File not found")
+            
+        from fastapi.responses import FileResponse
+        return FileResponse(target_path)
+
     # --- Config Management ---
     @app.post("/api/settings")
     async def update_settings(settings: AppSettings, x_pin: Optional[str] = Header(None, alias="X-PIN")):

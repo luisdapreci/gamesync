@@ -100,10 +100,6 @@ class SyncEngine:
             "action": "local_change",
             "details": f"Detected local file change"
         })
-
-        # Push to peers
-        await self.push_file_to_peers(game, relative_path, absolute_path, new_db_state["sync_version"])
-
     async def push_file_to_peers(self, game: GameProfile, relative_path: str, local_path: Path, sync_version: int):
         peers = await self.db.get_peers()
         online_peers = [p for p in peers if p["status"] == "online"]
@@ -385,3 +381,175 @@ class SyncEngine:
             await self.db.log_event(game_id, relative_path, "backup_created", details=f"Backup file: {backup_path.name}")
         except Exception as e:
             logger.error(f"Failed to create backup for {relative_path}: {e}")
+
+    # --- Manual Sync Engine Methods ---
+    async def compare_with_peer(self, game_id: str, peer_id: str) -> Dict[str, Any]:
+        game = next((g for g in self.config_manager.settings.games if g.id == game_id), None)
+        if not game:
+            raise ValueError(f"Game profile {game_id} not configured locally")
+            
+        peers = await self.db.get_peers()
+        peer = next((p for p in peers if p["peer_id"] == peer_id), None)
+        if not peer:
+            raise ValueError(f"Peer {peer_id} not found")
+            
+        if peer["status"] != "online":
+            raise ValueError(f"Peer {peer['name']} is offline")
+            
+        # Get remote state
+        url = f"http://{peer['host']}:{peer['port']}/api/games/{game_id}/state"
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(url, headers={"X-PIN": self.config_manager.settings.pin})
+            if resp.status_code != 200:
+                raise ValueError(f"Failed to fetch remote state: {resp.text}")
+            remote_files = resp.json()
+            
+        # Get local state
+        root_path = Path(game.path).resolve()
+        local_files = {}
+        if root_path.exists():
+            import fnmatch
+            from .watcher import IGNORE_EXTENSIONS
+            for file_path in root_path.rglob("*"):
+                if file_path.is_file():
+                    if file_path.suffix.lower() in IGNORE_EXTENSIONS:
+                        continue
+                    try:
+                        relative_path = file_path.relative_to(root_path)
+                        rel_str = str(relative_path).replace('\\', '/')
+                    except ValueError:
+                        continue
+                    
+                    pattern = game.pattern or "*"
+                    if not fnmatch.fnmatch(file_path.name, pattern):
+                        continue
+                    
+                    stat = file_path.stat()
+                    local_files[rel_str] = {
+                        "size": stat.st_size,
+                        "mtime": stat.st_mtime,
+                        "sha256": compute_sha256(file_path)
+                    }
+                    
+        remote_dict = {f["relative_path"]: f for f in remote_files}
+        
+        # Compare
+        differences = []
+        all_paths = set(local_files.keys()).union(set(remote_dict.keys()))
+        
+        for path in all_paths:
+            l = local_files.get(path)
+            r = remote_dict.get(path)
+            
+            if l and r:
+                if l["sha256"] != r["sha256"]:
+                    differences.append({
+                        "relative_path": path,
+                        "local": l,
+                        "remote": r,
+                        "status": "modified"
+                    })
+            elif l and not r:
+                differences.append({
+                    "relative_path": path,
+                    "local": l,
+                    "remote": None,
+                    "status": "local_only"
+                })
+            elif not l and r:
+                differences.append({
+                    "relative_path": path,
+                    "local": None,
+                    "remote": r,
+                    "status": "remote_only"
+                })
+                
+        return {"differences": differences}
+
+    async def _push_file_to_specific_peer(self, game: GameProfile, relative_path: str, local_path: Path, sync_version: int, peer: dict):
+        stat = local_path.stat()
+        file_size = stat.st_size
+        mtime = stat.st_mtime
+        sha256 = compute_sha256(local_path)
+        
+        url = f"http://{peer['host']}:{peer['port']}/api/sync/push"
+        try:
+            headers = {
+                "X-Game-Id": game.id,
+                "X-Relative-Path": relative_path,
+                "X-File-Size": str(file_size),
+                "X-Mtime": str(mtime),
+                "X-Sha256": sha256,
+                "X-Sync-Version": str(sync_version),
+                "X-Sender-Id": self.node_id,
+                "X-Sender-Name": self.config_manager.settings.node_name,
+                "X-PIN": self.config_manager.settings.pin
+            }
+            
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                with open(local_path, "rb") as f:
+                    response = await client.post(url, headers=headers, content=f)
+                
+                if response.status_code == 200:
+                    logger.info(f"Successfully pushed to {peer['name']}")
+                else:
+                    logger.error(f"Failed to push to {peer['name']}: {response.status_code} - {response.text}")
+        except Exception as e:
+            logger.error(f"Error communicating with peer {peer['name']}: {e}")
+
+    async def execute_manual_sync(self, game_id: str, peer_id: str, selection: str):
+        game = next((g for g in self.config_manager.settings.games if g.id == game_id), None)
+        if not game:
+            raise ValueError(f"Game profile {game_id} not configured locally")
+            
+        peers = await self.db.get_peers()
+        peer = next((p for p in peers if p["peer_id"] == peer_id), None)
+        if not peer:
+            raise ValueError(f"Peer {peer_id} not found")
+            
+        compare_result = await self.compare_with_peer(game_id, peer_id)
+        differences = compare_result["differences"]
+        
+        root_path = Path(game.path).resolve()
+        
+        if selection == "local":
+            for diff in differences:
+                if diff["local"]:
+                    local_path = root_path / diff["relative_path"]
+                    db_state = await self.db.get_file_state(game_id, diff["relative_path"])
+                    sv = db_state["sync_version"] if db_state else 1
+                    await self._push_file_to_specific_peer(game, diff["relative_path"], local_path, sv, peer)
+            
+            pushed_count = len([d for d in differences if d.get("local")])
+            self.trigger_ui_update("sync_log", {
+                "game_id": game_id,
+                "relative_path": "Multiple Files",
+                "action": "local_change",
+                "details": f"Manually pushed {pushed_count} files to {peer['name']}"
+            })
+            
+        elif selection == "remote":
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                for diff in differences:
+                    if diff["remote"]:
+                        remote_file = diff["remote"]
+                        url = f"http://{peer['host']}:{peer['port']}/api/games/{game_id}/file?path={remote_file['relative_path']}"
+                        resp = await client.get(url, headers={"X-PIN": self.config_manager.settings.pin})
+                        if resp.status_code == 200:
+                            content = resp.content
+                            local_path = root_path / diff["relative_path"]
+                            local_path.parent.mkdir(parents=True, exist_ok=True)
+                            await self._create_backup(game_id, diff["relative_path"], local_path)
+                            await self._apply_remote_file(
+                                game_id, 
+                                diff["relative_path"], 
+                                local_path, 
+                                content, 
+                                remote_file["size"], 
+                                remote_file["mtime"], 
+                                remote_file["sha256"], 
+                                remote_file.get("sync_version", 1), 
+                                peer["name"]
+                            )
+                        else:
+                            logger.error(f"Failed to download {diff['relative_path']}: {resp.status_code}")

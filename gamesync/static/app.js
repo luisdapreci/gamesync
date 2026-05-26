@@ -8,6 +8,16 @@ let ws = null;
 let currentBrowserPath = "";
 
 // DOM Elements
+const remoteGamesList = document.getElementById("remote-games-list");
+const refreshRemoteBtn = document.getElementById("refresh-remote-btn");
+const manualSyncModal = document.getElementById("manual-sync-modal");
+const syncPeerSelect = document.getElementById("sync-peer-select");
+const syncDifferencesList = document.getElementById("sync-differences-list");
+const syncKeepLocalBtn = document.getElementById("sync-keep-local-btn");
+const syncKeepRemoteBtn = document.getElementById("sync-keep-remote-btn");
+const btnCloseSyncModalList = document.querySelectorAll(".btn-close-sync-modal");
+let currentSyncGameId = null;
+
 const authScreen = document.getElementById("auth-screen");
 const appContainer = document.getElementById("app-container");
 const pinInput = document.getElementById("pin-input");
@@ -284,12 +294,23 @@ async function refreshGames() {
                     <div class="game-meta">Sync Pattern: <code>${escapeHtml(game.pattern)}</code></div>
                 </div>
                 <div class="game-actions">
+                    <button class="btn btn-sm btn-primary sync-game-btn" data-id="${game.id}" style="margin-right: 8px;">
+                        <i class="fa-solid fa-rotate"></i> Sync
+                    </button>
                     <button class="btn btn-sm btn-danger delete-game-btn" data-id="${game.id}">
                         <i class="fa-solid fa-trash-can"></i> Remove
                     </button>
                 </div>
             `;
             gamesList.appendChild(item);
+        });
+        
+        // Attach sync listeners
+        document.querySelectorAll(".sync-game-btn").forEach(btn => {
+            btn.addEventListener("click", () => {
+                const gameId = btn.getAttribute("data-id");
+                openManualSync(gameId);
+            });
         });
         
         // Attach delete listeners
@@ -674,3 +695,176 @@ function formatBytes(bytes, decimals = 2) {
 if (API_PIN) {
     tryUnlock(API_PIN);
 }
+
+// --- Remote Games & Manual Sync Logic ---
+async function refreshRemoteGames() {
+    try {
+        const games = await apiFetch("/api/games/remote");
+        if (games.length === 0) {
+            if(remoteGamesList) remoteGamesList.innerHTML = '<div class="empty-state"><p>No remote games found.</p></div>';
+            return;
+        }
+        
+        if(remoteGamesList) {
+            remoteGamesList.innerHTML = '';
+            games.forEach(game => {
+                const div = document.createElement("div");
+                div.className = "game-item";
+                div.innerHTML = `
+                    <div class="game-info">
+                        <div class="game-title">${escapeHtml(game.game_name)}</div>
+                        <div class="game-meta">On: ${escapeHtml(game.peer_name)}</div>
+                    </div>
+                    <div class="game-actions">
+                        <button class="btn btn-sm btn-primary link-remote-btn" data-id="${escapeHtml(game.game_id)}" data-name="${escapeHtml(game.game_name)}">
+                            <i class="fa-solid fa-link"></i> Link Local
+                        </button>
+                    </div>
+                `;
+                remoteGamesList.appendChild(div);
+            });
+            
+            document.querySelectorAll(".link-remote-btn").forEach(btn => {
+                btn.addEventListener("click", () => {
+                    const gameName = btn.getAttribute("data-name");
+                    addGameModal.classList.remove("hidden");
+                    gameNameInput.value = gameName;
+                    gamePathInput.value = ""; 
+                });
+            });
+        }
+    } catch (e) {
+        if(remoteGamesList) remoteGamesList.innerHTML = '<div class="empty-state"><p>Error loading remote games.</p></div>';
+    }
+}
+
+if(refreshRemoteBtn) {
+    refreshRemoteBtn.addEventListener("click", refreshRemoteGames);
+}
+
+if(btnCloseSyncModalList) {
+    btnCloseSyncModalList.forEach(btn => {
+        btn.addEventListener("click", () => manualSyncModal.classList.add("hidden"));
+    });
+}
+
+async function openManualSync(gameId) {
+    currentSyncGameId = gameId;
+    manualSyncModal.classList.remove("hidden");
+    syncDifferencesList.innerHTML = '<div class="empty-state"><i class="fa-solid fa-spinner fa-spin"></i><p>Loading peers...</p></div>';
+    syncKeepLocalBtn.disabled = true;
+    syncKeepRemoteBtn.disabled = true;
+    
+    try {
+        const peers = await apiFetch("/api/peers");
+        const onlinePeers = peers.filter(p => p.status === "online");
+        
+        if (onlinePeers.length === 0) {
+            syncDifferencesList.innerHTML = '<div class="empty-state"><p>No online peers to sync with.</p></div>';
+            return;
+        }
+        
+        syncPeerSelect.innerHTML = "";
+        onlinePeers.forEach(p => {
+            const opt = document.createElement("option");
+            opt.value = p.peer_id;
+            opt.textContent = p.name;
+            syncPeerSelect.appendChild(opt);
+        });
+        
+        loadDifferencesForPeer(onlinePeers[0].peer_id);
+        syncPeerSelect.onchange = (e) => loadDifferencesForPeer(e.target.value);
+        
+    } catch (e) {
+        syncDifferencesList.innerHTML = '<div class="empty-state"><p>Error loading peers.</p></div>';
+    }
+}
+
+async function loadDifferencesForPeer(peerId) {
+    syncDifferencesList.innerHTML = '<div class="empty-state"><i class="fa-solid fa-spinner fa-spin"></i><p>Comparing files...</p></div>';
+    syncKeepLocalBtn.disabled = true;
+    syncKeepRemoteBtn.disabled = true;
+    
+    try {
+        const result = await apiFetch(`/api/games/${currentSyncGameId}/compare/${peerId}`);
+        const diffs = result.differences;
+        
+        if (diffs.length === 0) {
+            syncDifferencesList.innerHTML = '<div class="empty-state"><p>All files are in sync!</p></div>';
+            return;
+        }
+        
+        syncDifferencesList.innerHTML = '<table class="logs-table" style="width:100%"><thead><tr><th>File</th><th>Local Size/Time</th><th>Remote Size/Time</th><th>Status</th></tr></thead><tbody></tbody></table>';
+        const tbody = syncDifferencesList.querySelector("tbody");
+        
+        diffs.forEach(d => {
+            const tr = document.createElement("tr");
+            const lSize = d.local ? formatBytes(d.local.size) : "-";
+            const lTime = d.local ? new Date(d.local.mtime * 1000).toLocaleString() : "-";
+            const rSize = d.remote ? formatBytes(d.remote.size) : "-";
+            const rTime = d.remote ? new Date(d.remote.mtime * 1000).toLocaleString() : "-";
+            
+            let statusHtml = "";
+            if (d.status === "modified") statusHtml = '<span class="badge-action local_change">Modified</span>';
+            else if (d.status === "local_only") statusHtml = '<span class="badge-action backup_created">Local Only</span>';
+            else if (d.status === "remote_only") statusHtml = '<span class="badge-action download">Remote Only</span>';
+            
+            tr.innerHTML = `
+                <td><strong>${escapeHtml(d.relative_path)}</strong></td>
+                <td>${lSize}<br><small class="text-muted">${lTime}</small></td>
+                <td>${rSize}<br><small class="text-muted">${rTime}</small></td>
+                <td>${statusHtml}</td>
+            `;
+            tbody.appendChild(tr);
+        });
+        
+        syncKeepLocalBtn.disabled = false;
+        syncKeepRemoteBtn.disabled = false;
+        
+    } catch (e) {
+        syncDifferencesList.innerHTML = '<div class="empty-state"><p>Error comparing files: ' + escapeHtml(e.message) + '</p></div>';
+    }
+}
+
+if(syncKeepLocalBtn) {
+    syncKeepLocalBtn.addEventListener("click", () => executeManualSync("local"));
+}
+if(syncKeepRemoteBtn) {
+    syncKeepRemoteBtn.addEventListener("click", () => executeManualSync("remote"));
+}
+
+async function executeManualSync(selection) {
+    const peerId = syncPeerSelect.value;
+    if (!peerId || !currentSyncGameId) return;
+    
+    syncKeepLocalBtn.disabled = true;
+    syncKeepRemoteBtn.disabled = true;
+    syncDifferencesList.innerHTML = '<div class="empty-state"><i class="fa-solid fa-spinner fa-spin"></i><p>Syncing...</p></div>';
+    
+    try {
+        await apiFetch("/api/sync/manual", {
+            method: "POST",
+            body: JSON.stringify({
+                game_id: currentSyncGameId,
+                peer_id: peerId,
+                selection: selection
+            })
+        });
+        
+        showToast("Sync completed successfully!");
+        manualSyncModal.classList.add("hidden");
+        loadInitialLogs();
+    } catch (e) {
+        showToast("Sync failed: " + e.message, "error");
+        syncKeepLocalBtn.disabled = false;
+        syncKeepRemoteBtn.disabled = false;
+        syncDifferencesList.innerHTML = '<div class="empty-state"><p>Failed to sync. Try again.</p></div>';
+    }
+}
+
+// Hook into initDashboard
+const oldInitDashboard = initDashboard;
+initDashboard = async function() {
+    await oldInitDashboard();
+    await refreshRemoteGames();
+};

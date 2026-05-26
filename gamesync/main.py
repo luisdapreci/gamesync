@@ -67,21 +67,11 @@ async def run_initial_scan(config_manager: ConfigManager, db: SyncDatabase, sync
                     await db.update_file_state(game.id, rel_str, file_size, mtime, sha256, status="synced", bump_version=True)
                     new_db_state = await db.get_file_state(game.id, rel_str)
                     await db.log_event(game.id, rel_str, "local_change", details="Found during initial scan")
-                    
-                    # Push to peers in background
-                    asyncio.create_task(
-                        sync_engine.push_file_to_peers(game, rel_str, file_path, new_db_state["sync_version"])
-                    )
                 elif db_state["sha256"] != sha256:
                     logger.info(f"Scan: Found offline modified save file {game.name}/{rel_str}")
                     await db.update_file_state(game.id, rel_str, file_size, mtime, sha256, status="synced", bump_version=True)
                     new_db_state = await db.get_file_state(game.id, rel_str)
                     await db.log_event(game.id, rel_str, "local_change", details="Modified offline")
-                    
-                    # Push to peers in background
-                    asyncio.create_task(
-                        sync_engine.push_file_to_peers(game, rel_str, file_path, new_db_state["sync_version"])
-                    )
 
 # Define file change callback for watchdog
 def on_file_changed(game_id: str, relative_path: str):

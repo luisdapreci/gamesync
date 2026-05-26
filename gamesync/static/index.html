@@ -106,6 +106,16 @@
 
                 <!-- Sidebar column -->
                 <div class="sidebar-column">
+                    <!-- Remote Games Panel -->
+                    <section class="card panel-card remote-games-panel">
+                        <div class="panel-header">
+                            <h2><i class="fa-solid fa-cloud-arrow-down"></i> Remote Games</h2>
+                            <button id="refresh-remote-btn" class="btn btn-sm btn-secondary" title="Refresh"><i class="fa-solid fa-arrows-rotate"></i></button>
+                        </div>
+                        <div id="remote-games-list" class="list-container compact">
+                            <!-- Dynamic Remote Games -->
+                        </div>
+                    </section>
                     <!-- Peers Panel -->
                     <section class="card panel-card peers-panel">
                         <div class="panel-header">
@@ -209,6 +219,30 @@
             <div class="modal-footer">
                 <button class="btn btn-secondary btn-close-modal">Cancel</button>
                 <button id="save-game-btn" class="btn btn-primary">Create Profile</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal: Manual Sync Compare -->
+    <div id="manual-sync-modal" class="modal-overlay hidden">
+        <div class="modal-card" style="max-width: 800px; width: 90%;">
+            <div class="modal-header">
+                <h3><i class="fa-solid fa-code-compare"></i> Manual Sync</h3>
+                <button class="modal-close btn-close-sync-modal"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <div class="modal-body" style="max-height: 60vh; overflow-y: auto;">
+                <div id="sync-peer-selector" class="form-group">
+                    <label>Select Peer to Sync With:</label>
+                    <select id="sync-peer-select"></select>
+                </div>
+                <div id="sync-differences-list">
+                    <div class="empty-state"><i class="fa-solid fa-spinner fa-spin"></i><p>Comparing files...</p></div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary btn-close-sync-modal">Cancel</button>
+                <button id="sync-keep-local-btn" class="btn btn-primary">Keep Local Data (Push)</button>
+                <button id="sync-keep-remote-btn" class="btn btn-primary">Keep Remote Data (Pull)</button>
             </div>
         </div>
     </div>
