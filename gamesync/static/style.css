@@ -739,6 +739,32 @@ h1, h2, h3, h4 {
     font-weight: 600;
 }
 
+.modal-close {
+    background: transparent;
+    border: none;
+    color: var(--color-text-muted);
+    font-size: 1.2rem;
+    cursor: pointer;
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    transition: var(--transition-quick);
+    margin-right: -0.5rem;
+}
+
+.modal-close:hover {
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--color-text-main);
+    transform: rotate(90deg);
+}
+
+.modal-close:active {
+    transform: scale(0.9) rotate(90deg);
+}
+
 .modal-body {
     flex-grow: 1;
     overflow-y: auto;
@@ -959,6 +985,11 @@ h1, h2, h3, h4 {
     color: var(--color-text-muted);
     cursor: pointer;
     font-size: 0.9rem;
+    transition: var(--transition-quick);
+}
+
+.toast-close:hover {
+    color: var(--color-text-main);
 }
 
 /* Animations */
