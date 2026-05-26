@@ -6,6 +6,7 @@ import logging
 import asyncio
 from pathlib import Path
 from typing import Dict, Any, List, Optional
+from urllib.parse import quote
 import time
 from .config import ConfigManager, CONFIG_DIR
 from .database import SyncDatabase
@@ -100,6 +101,7 @@ class SyncEngine:
             "action": "local_change",
             "details": f"Detected local file change"
         })
+
     async def push_file_to_peers(self, game: GameProfile, relative_path: str, local_path: Path, sync_version: int):
         peers = await self.db.get_peers()
         online_peers = [p for p in peers if p["status"] == "online"]
@@ -132,7 +134,12 @@ class SyncEngine:
                 async with httpx.AsyncClient(timeout=30.0) as client:
                     logger.info(f"Pushing {relative_path} to {peer['name']} ({url})...")
                     with open(local_path, "rb") as f:
-                        response = await client.post(url, headers=headers, content=f)
+                        file_name = local_path.name
+                        response = await client.post(
+                            url,
+                            headers=headers,
+                            files={"file": (file_name, f, "application/octet-stream")}
+                        )
                     
                     if response.status_code == 200:
                         logger.info(f"Successfully pushed to {peer['name']}")
@@ -488,7 +495,12 @@ class SyncEngine:
             
             async with httpx.AsyncClient(timeout=30.0) as client:
                 with open(local_path, "rb") as f:
-                    response = await client.post(url, headers=headers, content=f)
+                    file_name = local_path.name
+                    response = await client.post(
+                        url,
+                        headers=headers,
+                        files={"file": (file_name, f, "application/octet-stream")}
+                    )
                 
                 if response.status_code == 200:
                     logger.info(f"Successfully pushed to {peer['name']}")
@@ -513,43 +525,78 @@ class SyncEngine:
         root_path = Path(game.path).resolve()
         
         if selection == "local":
+            # Push all files that exist locally (local_only + modified) to the peer
+            pushed = 0
+            errors = 0
             for diff in differences:
                 if diff["local"]:
                     local_path = root_path / diff["relative_path"]
+                    if not local_path.exists():
+                        logger.warning(f"Local file disappeared before push: {diff['relative_path']}")
+                        errors += 1
+                        continue
                     db_state = await self.db.get_file_state(game_id, diff["relative_path"])
                     sv = db_state["sync_version"] if db_state else 1
-                    await self._push_file_to_specific_peer(game, diff["relative_path"], local_path, sv, peer)
+                    try:
+                        await self._push_file_to_specific_peer(game, diff["relative_path"], local_path, sv, peer)
+                        pushed += 1
+                    except Exception as e:
+                        logger.error(f"Failed to push {diff['relative_path']}: {e}")
+                        errors += 1
             
-            pushed_count = len([d for d in differences if d.get("local")])
+            details = f"Manually pushed {pushed} file(s) to {peer['name']}"
+            if errors:
+                details += f" ({errors} failed)"
+            await self.db.log_event(game_id, "manual_sync", "push", peer_name=peer["name"], details=details)
             self.trigger_ui_update("sync_log", {
                 "game_id": game_id,
-                "relative_path": "Multiple Files",
-                "action": "local_change",
-                "details": f"Manually pushed {pushed_count} files to {peer['name']}"
+                "relative_path": "manual_sync",
+                "action": "push",
+                "details": details
             })
             
         elif selection == "remote":
+            # Pull all files that exist remotely (remote_only + modified) from the peer
+            pulled = 0
+            errors = 0
             async with httpx.AsyncClient(timeout=30.0) as client:
                 for diff in differences:
                     if diff["remote"]:
                         remote_file = diff["remote"]
-                        url = f"http://{peer['host']}:{peer['port']}/api/games/{game_id}/file?path={remote_file['relative_path']}"
-                        resp = await client.get(url, headers={"X-PIN": self.config_manager.settings.pin})
-                        if resp.status_code == 200:
-                            content = resp.content
-                            local_path = root_path / diff["relative_path"]
-                            local_path.parent.mkdir(parents=True, exist_ok=True)
-                            await self._create_backup(game_id, diff["relative_path"], local_path)
-                            await self._apply_remote_file(
-                                game_id, 
-                                diff["relative_path"], 
-                                local_path, 
-                                content, 
-                                remote_file["size"], 
-                                remote_file["mtime"], 
-                                remote_file["sha256"], 
-                                remote_file.get("sync_version", 1), 
-                                peer["name"]
-                            )
-                        else:
-                            logger.error(f"Failed to download {diff['relative_path']}: {resp.status_code}")
+                        url = f"http://{peer['host']}:{peer['port']}/api/games/{game_id}/file?path={quote(diff['relative_path'], safe='')}"
+                        try:
+                            resp = await client.get(url, headers={"X-PIN": self.config_manager.settings.pin})
+                            if resp.status_code == 200:
+                                content = resp.content
+                                local_path = root_path / diff["relative_path"]
+                                local_path.parent.mkdir(parents=True, exist_ok=True)
+                                await self._create_backup(game_id, diff["relative_path"], local_path)
+                                await self._apply_remote_file(
+                                    game_id, 
+                                    diff["relative_path"], 
+                                    local_path, 
+                                    content, 
+                                    remote_file["size"], 
+                                    remote_file["mtime"], 
+                                    remote_file["sha256"], 
+                                    remote_file.get("sync_version", 1), 
+                                    peer["name"]
+                                )
+                                pulled += 1
+                            else:
+                                logger.error(f"Failed to download {diff['relative_path']}: {resp.status_code} - {resp.text}")
+                                errors += 1
+                        except Exception as e:
+                            logger.error(f"Error pulling {diff['relative_path']}: {e}")
+                            errors += 1
+
+            details = f"Manually pulled {pulled} file(s) from {peer['name']}"
+            if errors:
+                details += f" ({errors} failed)"
+            await self.db.log_event(game_id, "manual_sync", "pull", peer_name=peer["name"], details=details)
+            self.trigger_ui_update("sync_log", {
+                "game_id": game_id,
+                "relative_path": "manual_sync",
+                "action": "download",
+                "details": details
+            })
