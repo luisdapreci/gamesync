@@ -137,7 +137,37 @@ app.router.lifespan_context = lifespan
 def main():
     port = config_manager.settings.port
     logger.info(f"Starting GameSync Server on port {port}...")
-    uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
+
+    config = uvicorn.Config(
+        app,
+        host="0.0.0.0",
+        port=port,
+        log_level="warning",
+        # Release the port immediately when the process exits so a quick
+        # restart never hits "address already in use".
+        timeout_graceful_shutdown=5,
+    )
+    server = uvicorn.Server(config)
+
+    # Patch the underlying socket to set SO_REUSEADDR before binding,
+    # which lets a new process claim the port even if the old one's
+    # TIME_WAIT sockets haven't fully expired yet.
+    import socket as _socket
+    _orig_bind = _socket.socket.bind
+    def _reuseaddr_bind(self, *args, **kwargs):
+        try:
+            self.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        except Exception:
+            pass
+        return _orig_bind(self, *args, **kwargs)
+    _socket.socket.bind = _reuseaddr_bind
+
+    try:
+        server.run()
+    except KeyboardInterrupt:
+        logger.info("Interrupted — shutting down.")
+    finally:
+        _socket.socket.bind = _orig_bind  # restore
 
 if __name__ == "__main__":
     main()

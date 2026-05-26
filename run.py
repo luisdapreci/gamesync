@@ -7,4 +7,7 @@ sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 from gamesync.main import main
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass  # Ctrl+C — uvicorn already logged the shutdown
